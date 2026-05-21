@@ -1596,6 +1596,15 @@ h3 {
   gap: 14px;
 }
 
+.update-content {
+  display: grid;
+  gap: 12px;
+}
+
+.update-content strong {
+  color: var(--primary-dark);
+}
+
 .confirm-content p {
   color: var(--muted);
 }

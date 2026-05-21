@@ -61,6 +61,12 @@ import { DEVELOPER_NAME, DEFAULT_STORE_NAME, PAGE_SIZE } from './lib/appInfo';
 import { buildPageItems, clampPage, paginate, pageCount } from './lib/pagination';
 import { createCustomerReceiptPdf, makeReceiptFilename } from './lib/receipt';
 import {
+  CURRENT_APP_VERSION,
+  CURRENT_APP_VERSION_CODE,
+  fetchAvailableUpdate,
+  type UpdateManifest,
+} from './lib/update';
+import {
   type CalendarDay,
   buildCalendarDays,
   filterLogsByDate,
@@ -327,6 +333,8 @@ function App() {
     monthKeyFromDateKey(todayKey()),
   );
   const [showCalendar, setShowCalendar] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateManifest | null>(null);
+  const updateCheckStartedRef = useRef(false);
   const [pages, setPages] = useState<Record<PageKey, number>>(initialPages);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
 
@@ -353,6 +361,21 @@ function App() {
     const timer = window.setTimeout(() => setUnlocked(false), delay);
     return () => window.clearTimeout(timer);
   }, [unlocked, unlockedUntil]);
+
+  useEffect(() => {
+    if (updateCheckStartedRef.current) return;
+    updateCheckStartedRef.current = true;
+    fetchAvailableUpdate()
+      .then((update) => {
+        if (!update) return;
+        const skippedCode = Number(localStorage.getItem('suki-track:skip-update-code') || 0);
+        if (!update.required && skippedCode >= update.versionCode) return;
+        setAvailableUpdate(update);
+      })
+      .catch(() => {
+        // Offline or update host unavailable: keep the app usable.
+      });
+  }, []);
 
   const summaries = useMemo(
     () => (data ? buildCustomerSummaries(data) : []),
@@ -1076,6 +1099,15 @@ function App() {
       return;
     }
     setUnlocked(false);
+  }
+
+  function openUpdate(update: UpdateManifest) {
+    window.open(update.apkUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  function skipUpdate(update: UpdateManifest) {
+    localStorage.setItem('suki-track:skip-update-code', String(update.versionCode));
+    setAvailableUpdate(null);
   }
 
   if (!data) {
@@ -1933,6 +1965,44 @@ function App() {
             }
           }}
         />
+      )}
+
+      {availableUpdate && (
+        <Modal
+          title="Update available"
+          onClose={() => {
+            if (!availableUpdate.required) skipUpdate(availableUpdate);
+          }}
+        >
+          <div className="update-content">
+            <p>
+              A new SUKI TRACK version is ready: <strong>v{availableUpdate.version}</strong>
+            </p>
+            {availableUpdate.notes && <p className="muted">{availableUpdate.notes}</p>}
+            <p className="muted">
+              Current version: v{CURRENT_APP_VERSION} ({CURRENT_APP_VERSION_CODE})
+            </p>
+            <div className="button-row">
+              {!availableUpdate.required && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => skipUpdate(availableUpdate)}
+                >
+                  Later
+                </button>
+              )}
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => openUpdate(availableUpdate)}
+              >
+                <Download size={20} />
+                Update Now
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
 
       <nav className="bottom-nav" aria-label="Main navigation">
