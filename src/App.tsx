@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Lock,
   Package,
+  Pencil,
   Plus,
   Printer,
   Search,
@@ -1670,7 +1671,6 @@ function App() {
                   emptyKind="products"
                   onEdit={openProductModal}
                   onDelete={deleteProduct}
-                  t={t}
                 />
                 <Pagination
                   totalItems={filteredProducts.length}
@@ -2708,7 +2708,7 @@ function CustomerList({
               <>
                 {onEdit && (
                   <button type="button" className="swipe-action edit" onClick={() => onEdit(summary.customer)}>
-                    {t('edit')}
+                    <Pencil size={17} />
                   </button>
                 )}
                 {onDelete && (
@@ -3254,14 +3254,12 @@ function ProductList({
   emptyKind,
   onEdit,
   onDelete,
-  t,
 }: {
   products: Product[];
   emptyText: string;
   emptyKind: EmptyKind;
   onEdit: (product: Product) => void;
   onDelete: (product: Product) => void;
-  t: ReturnType<typeof getTranslator>;
 }) {
   if (!products.length) return <EmptyState kind={emptyKind} message={emptyText} />;
   return (
@@ -3272,7 +3270,7 @@ function ProductList({
           actions={
             <>
               <button type="button" className="swipe-action edit" onClick={() => onEdit(product)}>
-                {t('edit')}
+                <Pencil size={17} />
               </button>
               <button type="button" className="swipe-action delete" onClick={() => onDelete(product)}>
                 <Trash2 size={18} />
@@ -3287,9 +3285,9 @@ function ProductList({
             </span>
             <div>
               <h3>{product.name}</h3>
-              <p className="muted">{formatCurrency(product.price)}</p>
             </div>
           </div>
+          <p className="product-card-price">{formatCurrency(product.price)}</p>
         </article>
         </SwipeActions>
       ))}
@@ -3336,7 +3334,7 @@ function ActivityList({
             actions={
               <>
                 <button type="button" className="swipe-action edit" onClick={() => onEditDebt(log.id)}>
-                  {t('edit')}
+                  <Pencil size={17} />
                 </button>
                 <button type="button" className="swipe-action delete" onClick={() => onDeleteDebt(log.id)}>
                   <Trash2 size={18} />
