@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent,
+  type ReactNode,
+} from 'react';
 import {
   BookOpen,
   CalendarDays,
@@ -2663,15 +2672,6 @@ function CustomerList({
             >
               {t('view')}
             </button>
-            {onEdit && (
-              <button
-                type="button"
-                className="secondary-button tone-view"
-                onClick={() => onEdit(summary.customer)}
-              >
-                {t('edit')}
-              </button>
-            )}
             <button
               type="button"
               className="secondary-button tone-add"
@@ -2731,13 +2731,48 @@ function SwipeActions({
   children,
   actions,
 }: {
-  children: React.ReactNode;
-  actions: React.ReactNode;
+  children: ReactNode;
+  actions: ReactNode;
 }) {
+  const [open, setOpen] = useState(false);
+  const startRef = useRef<{ x: number; y: number } | null>(null);
+
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    startRef.current = { x: event.clientX, y: event.clientY };
+  }
+
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    const start = startRef.current;
+    if (!start) return;
+    const deltaX = event.clientX - start.x;
+    const deltaY = event.clientY - start.y;
+    if (Math.abs(deltaX) < 18 || Math.abs(deltaX) < Math.abs(deltaY)) return;
+    setOpen(deltaX < 0);
+  }
+
+  function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+    const start = startRef.current;
+    if (!start) return;
+    const deltaX = event.clientX - start.x;
+    if (deltaX < -28) setOpen(true);
+    if (deltaX > 28) setOpen(false);
+    startRef.current = null;
+  }
+
   return (
-    <div className="swipe-row">
-      <div className="swipe-content">{children}</div>
+    <div
+      className={open ? 'swipe-row is-open' : 'swipe-row'}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={() => {
+        startRef.current = null;
+      }}
+    >
       <div className="swipe-actions">{actions}</div>
+      <div className="swipe-content" onClick={() => open && setOpen(false)}>
+        {children}
+      </div>
     </div>
   );
 }

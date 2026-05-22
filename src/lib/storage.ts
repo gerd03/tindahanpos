@@ -279,18 +279,17 @@ class SqliteRepository implements AppRepository {
 
   async deleteCustomer(customerId: string): Promise<void> {
     await this.open();
-    await this.db!.execute('BEGIN TRANSACTION;', false);
-    try {
-      await this.db!.run(`DELETE FROM payments WHERE customer_id = ?;`, [customerId]);
-      await this.db!.run(`DELETE FROM ledger_entries WHERE customer_id = ?;`, [
-        customerId,
-      ]);
-      await this.db!.run(`DELETE FROM customers WHERE id = ?;`, [customerId]);
-      await this.db!.execute('COMMIT;', false);
-    } catch (error) {
-      await this.db!.execute('ROLLBACK;', false);
-      throw error;
-    }
+    await this.db!.executeSet(
+      [
+        { statement: `DELETE FROM payments WHERE customer_id = ?;`, values: [customerId] },
+        {
+          statement: `DELETE FROM ledger_entries WHERE customer_id = ?;`,
+          values: [customerId],
+        },
+        { statement: `DELETE FROM customers WHERE id = ?;`, values: [customerId] },
+      ],
+      true,
+    );
   }
 
   async addLedgerEntry(entry: LedgerEntry): Promise<void> {
@@ -317,16 +316,14 @@ class SqliteRepository implements AppRepository {
   async addLedgerEntries(entries: LedgerEntry[]): Promise<void> {
     if (!entries.length) return;
     await this.open();
-    await this.db!.execute('BEGIN TRANSACTION;', false);
-    try {
-      for (const entry of entries) {
-        await this.db!.run(
-          `
+    await this.db!.executeSet(
+      entries.map((entry) => ({
+        statement: `
           INSERT INTO ledger_entries
             (id, customer_id, product_id, item_name, quantity, unit_price, total, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?);
           `,
-          [
+        values: [
             entry.id,
             entry.customerId,
             entry.productId,
@@ -335,14 +332,10 @@ class SqliteRepository implements AppRepository {
             entry.unitPrice,
             entry.total,
             entry.createdAt,
-          ],
-        );
-      }
-      await this.db!.execute('COMMIT;', false);
-    } catch (error) {
-      await this.db!.execute('ROLLBACK;', false);
-      throw error;
-    }
+        ],
+      })),
+      true,
+    );
   }
 
   async updateLedgerEntry(entry: LedgerEntry): Promise<void> {
