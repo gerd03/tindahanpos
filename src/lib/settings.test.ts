@@ -14,13 +14,14 @@ describe('settings compatibility', () => {
     expect(settings.ownerName).toBe('');
     expect(settings.pinHash).toBe('hash');
     expect(settings.pinUpdatedAt).toBeNull();
+    expect(settings.biometricEnabled).toBe(true);
     expect(settings.pinTimeout).toEqual({
-      every: 10,
-      unit: 'minutes',
+      every: 1,
+      unit: 'hours',
     });
     expect(settings.autoBackup).toEqual({
       enabled: true,
-      every: 8,
+      every: 1,
       unit: 'hours',
       lastRunAt: null,
       lastAttemptAt: null,

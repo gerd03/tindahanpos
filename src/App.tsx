@@ -15,6 +15,7 @@ import {
   Search,
   Settings,
   Trash2,
+  TrendingUp,
   Upload,
   Users,
   X,
@@ -22,6 +23,7 @@ import {
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { NativeBiometric } from '@capgo/capacitor-native-biometric';
 import './index.css';
 import type {
   AppData,
@@ -53,6 +55,7 @@ import {
   findCustomerByName,
   findProductByName,
   validatePayment,
+  type UnpaidLedgerItem,
 } from './lib/ledger';
 import { createRepository, type AppRepository } from './lib/storage';
 import { hashPin, isValidPin, verifyPin } from './lib/security';
@@ -78,9 +81,10 @@ import {
   yesterdayKey,
 } from './lib/records';
 
-type Tab = 'utang' | 'people' | 'products' | 'history' | 'settings';
+type Tab = 'utang' | 'people' | 'products' | 'trends' | 'history' | 'settings';
 type PageKey = 'active' | 'people' | 'products' | 'paid' | 'logs';
 type EmptyKind = 'utang' | 'people' | 'products' | 'paid' | 'history';
+type TrendRange = 'week' | 'month';
 
 interface DebtCartItem {
   id: string;
@@ -89,6 +93,32 @@ interface DebtCartItem {
   quantity: number;
   unitPrice: number;
   total: number;
+}
+
+interface ProductTrendPoint {
+  dateKey: string;
+  label: string;
+  detailLabel: string;
+  quantity: number;
+  total: number;
+  items: ProductTrendItem[];
+}
+
+interface ProductTrendItem {
+  key: string;
+  name: string;
+  quantity: number;
+  total: number;
+}
+
+interface ProductTrendData {
+  year: number;
+  monthIndex: number;
+  points: ProductTrendPoint[];
+  topItems: ProductTrendItem[];
+  totalQuantity: number;
+  totalValue: number;
+  bestItem: ProductTrendItem | null;
 }
 
 const initialDebtForm = {
@@ -133,6 +163,7 @@ interface DownloadsBackupPlugin {
 }
 
 const DownloadsBackup = registerPlugin<DownloadsBackupPlugin>('DownloadsBackup');
+let lastBiometricPromptAt = 0;
 
 interface ConfirmDialogState {
   title: string;
@@ -140,6 +171,14 @@ interface ConfirmDialogState {
   confirmLabel: string;
   requiresPin?: boolean;
   pinHash?: string;
+  preferBiometric?: boolean;
+  onConfirm: () => Promise<void> | void;
+}
+
+interface SecureActionOptions {
+  title: string;
+  message: string;
+  confirmLabel: string;
   onConfirm: () => Promise<void> | void;
 }
 
@@ -156,6 +195,136 @@ function formatDateKeyLabel(dateKey: string) {
     day: 'numeric',
     year: 'numeric',
   });
+}
+
+function toLocalDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatTrendDayLabel(dateKey: string) {
+  const date = new Date(`${dateKey}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return dateKey;
+  return date.toLocaleDateString('en-PH', {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function getMonthName(monthIndex: number, format: 'short' | 'long' = 'short') {
+  return new Date(2026, monthIndex, 1).toLocaleDateString('en-PH', {
+    month: format,
+  });
+}
+
+function addTrendItem(
+  totalsByProduct: Map<string, ProductTrendItem>,
+  entry: LedgerEntry,
+) {
+  const productKey = entry.productId ?? entry.itemName.trim().toLowerCase();
+  const existing = totalsByProduct.get(productKey);
+  if (existing) {
+    existing.quantity = roundMoney(existing.quantity + entry.quantity);
+    existing.total = roundMoney(existing.total + entry.total);
+    return;
+  }
+  totalsByProduct.set(productKey, {
+    key: productKey,
+    name: entry.itemName,
+    quantity: roundMoney(entry.quantity),
+    total: roundMoney(entry.total),
+  });
+}
+
+function sortTrendItems(items: ProductTrendItem[]) {
+  return items.sort((left, right) => {
+    if (right.quantity !== left.quantity) return right.quantity - left.quantity;
+    return right.total - left.total;
+  });
+}
+
+function buildProductTrends(
+  data: AppData,
+  range: TrendRange = 'week',
+  selectedMonthIndex?: number,
+): ProductTrendData {
+  const validEntries = data.ledgerEntries.filter((entry) => {
+    const date = new Date(entry.createdAt);
+    return Number.isFinite(entry.quantity) && !Number.isNaN(date.getTime());
+  });
+  const latestEntryTime = validEntries
+    .map((entry) => new Date(entry.createdAt).getTime())
+    .sort((left, right) => right - left)[0];
+  const endDate = new Date(latestEntryTime ?? Date.now());
+  endDate.setHours(0, 0, 0, 0);
+  const trendYear = endDate.getFullYear();
+  const trendMonthIndex = selectedMonthIndex ?? endDate.getMonth();
+
+  const pointKeys =
+    range === 'month'
+      ? Array.from(
+          { length: new Date(trendYear, trendMonthIndex + 1, 0).getDate() },
+          (_, index) => {
+            const date = new Date(trendYear, trendMonthIndex, index + 1);
+            return toLocalDateKey(date);
+          },
+        )
+      : Array.from({ length: 7 }, (_, index) => {
+          const date = new Date(endDate);
+          date.setDate(endDate.getDate() - (6 - index));
+          return toLocalDateKey(date);
+        });
+
+  const allowedPointKeys = new Set(pointKeys);
+  const totalsByPoint = new Map(
+    pointKeys.map((dateKey) => [
+      dateKey,
+      {
+        quantity: 0,
+        total: 0,
+        items: new Map<string, ProductTrendItem>(),
+      },
+    ]),
+  );
+  const totalsByProduct = new Map<string, ProductTrendItem>();
+
+  for (const entry of validEntries) {
+    const entryDate = new Date(entry.createdAt);
+    const pointKey = toLocalDateKey(entryDate);
+    if (!allowedPointKeys.has(pointKey)) continue;
+
+    const pointTotal = totalsByPoint.get(pointKey);
+    if (!pointTotal) continue;
+    pointTotal.quantity = roundMoney(pointTotal.quantity + entry.quantity);
+    pointTotal.total = roundMoney(pointTotal.total + entry.total);
+    addTrendItem(pointTotal.items, entry);
+    addTrendItem(totalsByProduct, entry);
+  }
+
+  const points = pointKeys.map((dateKey) => {
+    const total = totalsByPoint.get(dateKey);
+    return {
+      dateKey,
+      label: formatTrendDayLabel(dateKey),
+      detailLabel: formatDateKeyLabel(dateKey),
+      quantity: roundMoney(total?.quantity ?? 0),
+      total: roundMoney(total?.total ?? 0),
+      items: sortTrendItems([...(total?.items.values() ?? [])]),
+    };
+  });
+  const topItems = sortTrendItems([...totalsByProduct.values()]).slice(0, 5);
+
+  return {
+    year: trendYear,
+    monthIndex: trendMonthIndex,
+    points,
+    topItems,
+    totalQuantity: roundMoney(points.reduce((sum, point) => sum + point.quantity, 0)),
+    totalValue: roundMoney(points.reduce((sum, point) => sum + point.total, 0)),
+    bestItem: topItems[0] ?? null,
+  };
 }
 
 function makeDetailedBackupFilename(data: AppData): string {
@@ -194,6 +363,31 @@ function getBackupLocationLabel(
   if (location === 'data') return t('appStorage');
   if (location === 'browser') return t('browserStorage');
   return '-';
+}
+
+async function verifyWithDeviceBiometric(t: ReturnType<typeof getTranslator>) {
+  if (!Capacitor.isNativePlatform()) return false;
+  const now = Date.now();
+  if (now - lastBiometricPromptAt < 1500) return false;
+  lastBiometricPromptAt = now;
+
+  try {
+    const availability = await NativeBiometric.isAvailable({ useFallback: true });
+    if (!availability.isAvailable) return false;
+    await NativeBiometric.verifyIdentity({
+      title: t('biometricTitle'),
+      subtitle: t('biometricSubtitle'),
+      description: t('biometricDescription'),
+      reason: t('biometricReason'),
+      negativeButtonText: t('usePinInstead'),
+      fallbackTitle: t('usePinInstead'),
+      useFallback: true,
+      maxAttempts: 2,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function requestDocumentPermissionIfNeeded() {
@@ -268,6 +462,39 @@ async function writeNativeBackup(
   }
 }
 
+async function writeNativeReceipt(base64: string, filename: string): Promise<string> {
+  const path = `receipts/${filename}`;
+  const writeTargets = [
+    { path, directory: Directory.Cache },
+    { path: filename, directory: Directory.Documents },
+    { path, directory: Directory.Data },
+  ];
+
+  let lastError: unknown;
+  for (const target of writeTargets) {
+    try {
+      const result = await Filesystem.writeFile({
+        ...target,
+        data: base64,
+        recursive: true,
+      });
+      return (
+        result.uri ||
+        (
+          await Filesystem.getUri({
+            path: target.path,
+            directory: target.directory,
+          })
+        ).uri
+      );
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 function getAutoBackupIntervalMs(settings: AutoBackupSettings): number {
   const count = Math.max(1, Number(settings.every) || 1);
   if (settings.unit === 'minutes') return count * 60_000;
@@ -319,6 +546,12 @@ function App() {
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [productForm, setProductForm] = useState({ name: '', price: '', id: '' });
   const [showProductModal, setShowProductModal] = useState(false);
+  const [showBulkProductModal, setShowBulkProductModal] = useState(false);
+  const [bulkProductRows, setBulkProductRows] = useState([{ name: '', price: '' }]);
+  const [customerForm, setCustomerForm] = useState({ id: '', name: '', note: '' });
+  const [showCustomerModal, setShowCustomerModal] = useState(false);
+  const [ledgerForm, setLedgerForm] = useState({ id: '', itemName: '', quantity: '', unitPrice: '' });
+  const [showLedgerModal, setShowLedgerModal] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
   const [unlockedUntil, setUnlockedUntil] = useState(0);
   const [pinInput, setPinInput] = useState('');
@@ -493,6 +726,16 @@ function App() {
     setData(await repository.load());
   }
 
+  function runSecureAction(options: SecureActionOptions) {
+    if (!data) return;
+    setConfirmDialog({
+      ...options,
+      requiresPin: true,
+      pinHash: data.settings.pinHash,
+      preferBiometric: data.settings.biometricEnabled,
+    });
+  }
+
   function makeCartItem({
     itemName,
     quantity,
@@ -624,25 +867,51 @@ function App() {
 
   async function saveDebt(event?: React.FormEvent) {
     event?.preventDefault();
-    const saved = await saveDebtForCustomer({
-      customerName: debtForm.customerName.trim(),
-      items: debtCart,
+    const customerName = debtForm.customerName.trim();
+    if (!customerName) return setNotice(t('required'));
+    if (!debtCart.length) return setNotice(t('noCartItems'));
+
+    runSecureAction({
+      title: t('confirmDebtTitle'),
+      message: t('confirmDebtMessage')
+        .replace('{name}', customerName)
+        .replace('{count}', String(debtCart.length))
+        .replace('{amount}', formatCurrency(debtCartTotal)),
+      confirmLabel: t('saveAllDebt'),
+      onConfirm: async () => {
+        const saved = await saveDebtForCustomer({
+          customerName,
+          items: debtCart,
+        });
+        if (saved) {
+          setDebtForm(initialDebtForm);
+          setDebtCart([]);
+          setShowDebtModal(false);
+        }
+      },
     });
-    if (saved) {
-      setDebtForm(initialDebtForm);
-      setDebtCart([]);
-      setShowDebtModal(false);
-    }
   }
 
   async function saveQuickDebt(event?: React.FormEvent) {
     event?.preventDefault();
     if (!quickDebtCustomer) return;
-    const saved = await saveDebtForCustomer({
-      customerName: quickDebtCustomer.customer.name,
-      items: quickDebtCart,
+    if (!quickDebtCart.length) return setNotice(t('noCartItems'));
+
+    runSecureAction({
+      title: t('confirmDebtTitle'),
+      message: t('confirmDebtMessage')
+        .replace('{name}', quickDebtCustomer.customer.name)
+        .replace('{count}', String(quickDebtCart.length))
+        .replace('{amount}', formatCurrency(quickDebtCartTotal)),
+      confirmLabel: t('saveAllDebt'),
+      onConfirm: async () => {
+        const saved = await saveDebtForCustomer({
+          customerName: quickDebtCustomer.customer.name,
+          items: quickDebtCart,
+        });
+        if (saved) closeQuickDebt();
+      },
     });
-    if (saved) closeQuickDebt();
   }
 
   function openQuickDebt(customerId: string) {
@@ -684,20 +953,14 @@ function App() {
     setSelectedPaymentEntries([]);
   }
 
-  async function savePayment(event: React.FormEvent) {
-    event.preventDefault();
+  async function savePaymentAfterPin({
+    amount,
+    selectedItems,
+  }: {
+    amount: number;
+    selectedItems: UnpaidLedgerItem[];
+  }) {
     if (!data || !repositoryRef.current || !payingCustomer) return;
-    const amount = selectedPaymentTotal > 0 ? selectedPaymentTotal : Number(paymentForm.amount);
-    const validation = validatePayment(amount, payingCustomer.balance);
-    if (!validation.ok) {
-      return setNotice(
-        validation.message.includes('bigger') ? t('overpayment') : t('invalidPayment'),
-      );
-    }
-
-    const selectedItems = payableItems.filter((item) =>
-      selectedPaymentEntries.includes(item.entry.id),
-    );
     const allocations = selectedItems.map((item) => ({
       ledgerEntryId: item.entry.id,
       amount: item.remaining,
@@ -727,6 +990,32 @@ function App() {
     await refresh();
   }
 
+  async function savePayment(event: React.FormEvent) {
+    event.preventDefault();
+    if (!data || !repositoryRef.current || !payingCustomer) return;
+    const amount = selectedPaymentTotal > 0 ? selectedPaymentTotal : Number(paymentForm.amount);
+    const validation = validatePayment(amount, payingCustomer.balance);
+    if (!validation.ok) {
+      return setNotice(
+        validation.message.includes('bigger') ? t('overpayment') : t('invalidPayment'),
+      );
+    }
+
+    const selectedItems = payableItems.filter((item) =>
+      selectedPaymentEntries.includes(item.entry.id),
+    );
+    runSecureAction({
+      title: t('confirmPaymentTitle'),
+      message: t('confirmPaymentMessage')
+        .replace('{name}', payingCustomer.customer.name)
+        .replace('{amount}', formatCurrency(amount)),
+      confirmLabel: t('savePayment'),
+      onConfirm: async () => {
+        await savePaymentAfterPin({ amount, selectedItems });
+      },
+    });
+  }
+
   async function saveProduct(event: React.FormEvent) {
     event.preventDefault();
     if (!data || !repositoryRef.current) return;
@@ -734,17 +1023,26 @@ function App() {
     const price = Number(productForm.price);
     if (!name) return setNotice(t('required'));
     if (!Number.isFinite(price) || price <= 0) return setNotice(t('invalidPrice'));
-    const existing = productForm.id
-      ? data.products.find((product) => product.id === productForm.id)
-      : undefined;
-    const product = existing
-      ? { ...existing, name, price: roundMoney(price), active: true, updatedAt: nowIso() }
-      : createProduct(name, price);
-    await repositoryRef.current.upsertProduct(product);
-    setProductForm({ name: '', price: '', id: '' });
-    setShowProductModal(false);
-    setNotice(t('saved'));
-    await refresh();
+    runSecureAction({
+      title: productForm.id ? t('editProduct') : t('addProduct'),
+      message: productForm.id
+        ? t('confirmEditProduct').replace('{name}', name)
+        : t('confirmAddProduct').replace('{name}', name),
+      confirmLabel: t('save'),
+      onConfirm: async () => {
+        const existing = productForm.id
+          ? data.products.find((product) => product.id === productForm.id)
+          : undefined;
+        const product = existing
+          ? { ...existing, name, price: roundMoney(price), active: true, updatedAt: nowIso() }
+          : createProduct(name, price);
+        await repositoryRef.current!.upsertProduct(product);
+        setProductForm({ name: '', price: '', id: '' });
+        setShowProductModal(false);
+        setNotice(t('saved'));
+        await refresh();
+      },
+    });
   }
 
   function openProductModal(product?: Product) {
@@ -761,9 +1059,146 @@ function App() {
     setShowProductModal(false);
   }
 
+  async function saveBulkProducts(event: React.FormEvent) {
+    event.preventDefault();
+    if (!data || !repositoryRef.current) return;
+    const items = bulkProductRows
+      .map((row) => ({ name: row.name.trim(), price: Number(row.price) }))
+      .filter((item) => item.name && Number.isFinite(item.price) && item.price > 0);
+    if (!items.length) return setNotice(t('invalidBulkProducts'));
+
+    runSecureAction({
+      title: t('bulkAddProducts'),
+      message: t('confirmBulkAddProducts').replace('{count}', String(items.length)),
+      confirmLabel: t('saveAllDebt'),
+      onConfirm: async () => {
+        for (const item of items) {
+          await repositoryRef.current!.upsertProduct(createProduct(item.name, item.price));
+        }
+        setBulkProductRows([{ name: '', price: '' }]);
+        setShowBulkProductModal(false);
+        setNotice(t('saved'));
+        await refresh();
+      },
+    });
+  }
+
+  function openBulkProductAdd() {
+    setBulkProductRows([{ name: '', price: '' }]);
+    setShowBulkProductModal(true);
+  }
+
+  function updateBulkProductRow(index: number, next: Partial<{ name: string; price: string }>) {
+    setBulkProductRows((current) =>
+      current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...next } : row)),
+    );
+  }
+
+  function addBulkProductRow() {
+    setBulkProductRows((current) => [...current, { name: '', price: '' }]);
+  }
+
+  function removeBulkProductRow(index: number) {
+    setBulkProductRows((current) =>
+      current.length === 1 ? current : current.filter((_, rowIndex) => rowIndex !== index),
+    );
+  }
+
+  function openCustomerModal(customer: Customer) {
+    setCustomerForm({ id: customer.id, name: customer.name, note: customer.note });
+    setShowCustomerModal(true);
+  }
+
+  async function saveCustomer(event: React.FormEvent) {
+    event.preventDefault();
+    if (!data || !repositoryRef.current) return;
+    const name = customerForm.name.trim();
+    if (!name) return setNotice(t('required'));
+    const customer = data.customers.find((item) => item.id === customerForm.id);
+    if (!customer) return;
+    runSecureAction({
+      title: t('editPerson'),
+      message: t('confirmEditPerson').replace('{name}', name),
+      confirmLabel: t('save'),
+      onConfirm: async () => {
+        await repositoryRef.current!.upsertCustomer({
+          ...customer,
+          name,
+          note: customerForm.note.trim(),
+          updatedAt: nowIso(),
+        });
+        setShowCustomerModal(false);
+        setCustomerForm({ id: '', name: '', note: '' });
+        setNotice(t('saved'));
+        await refresh();
+      },
+    });
+  }
+
+  function openLedgerModal(entryId: string) {
+    if (!data) return;
+    const entry = data.ledgerEntries.find((item) => item.id === entryId);
+    if (!entry) return;
+    setLedgerForm({
+      id: entry.id,
+      itemName: entry.itemName,
+      quantity: String(entry.quantity),
+      unitPrice: String(entry.unitPrice),
+    });
+    setShowLedgerModal(true);
+  }
+
+  async function saveLedgerEntry(event: React.FormEvent) {
+    event.preventDefault();
+    if (!data || !repositoryRef.current) return;
+    const entry = data.ledgerEntries.find((item) => item.id === ledgerForm.id);
+    if (!entry) return;
+    const itemName = ledgerForm.itemName.trim();
+    const quantity = Number(ledgerForm.quantity);
+    const unitPrice = Number(ledgerForm.unitPrice);
+    if (!itemName) return setNotice(t('required'));
+    if (!Number.isFinite(quantity) || quantity <= 0) return setNotice(t('invalidQuantity'));
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) return setNotice(t('invalidPrice'));
+
+    runSecureAction({
+      title: t('editDebtItem'),
+      message: t('confirmEditDebtItem').replace('{name}', itemName),
+      confirmLabel: t('save'),
+      onConfirm: async () => {
+        await repositoryRef.current!.updateLedgerEntry({
+          ...entry,
+          itemName,
+          quantity: roundMoney(quantity),
+          unitPrice: roundMoney(unitPrice),
+          total: roundMoney(quantity * unitPrice),
+        });
+        setShowLedgerModal(false);
+        setLedgerForm({ id: '', itemName: '', quantity: '', unitPrice: '' });
+        setNotice(t('saved'));
+        await refresh();
+      },
+    });
+  }
+
+  async function deleteLedgerEntry(entryId: string) {
+    if (!data || !repositoryRef.current) return;
+    const entry = data.ledgerEntries.find((item) => item.id === entryId);
+    if (!entry) return;
+    runSecureAction({
+      title: t('deleteDebtItem'),
+      message: t('confirmDeleteDebtItem').replace('{name}', entry.itemName),
+      confirmLabel: t('delete'),
+      onConfirm: async () => {
+        await repositoryRef.current!.deleteLedgerEntry(entry.id);
+        setNotice(t('saved'));
+        await refresh();
+      },
+    });
+  }
+
   async function deleteProduct(product: Product) {
-    if (!repositoryRef.current) return;
-    setConfirmDialog({
+    if (!data || !repositoryRef.current) return;
+    runSecureAction({
       title: t('delete'),
       message: t('confirmDelete'),
       confirmLabel: t('delete'),
@@ -779,12 +1214,10 @@ function App() {
     if (!data || !repositoryRef.current) return;
     const summary = summaries.find((item) => item.customer.id === customerId);
     if (!summary) return;
-    setConfirmDialog({
+    runSecureAction({
       title: t('deleteCustomer'),
       message: t('confirmDeleteCustomer').replace('{name}', summary.customer.name),
       confirmLabel: t('delete'),
-      requiresPin: true,
-      pinHash: data.settings.pinHash,
       onConfirm: async () => {
         await repositoryRef.current!.deleteCustomer(summary.customer.id);
         if (selectedCustomerId === summary.customer.id) setSelectedCustomerId(null);
@@ -820,6 +1253,11 @@ function App() {
   async function changeUiSize(uiSize: AppSettings['uiSize']) {
     if (!data) return;
     await updateSettings({ ...data.settings, uiSize });
+  }
+
+  async function changeBiometricEnabled(biometricEnabled: boolean) {
+    if (!data) return;
+    await updateSettings({ ...data.settings, biometricEnabled });
   }
 
   async function changePinTimeout(next: Partial<AppSettings['pinTimeout']>) {
@@ -988,50 +1426,6 @@ function App() {
     await writeBackupFile(data, true);
   }
 
-  async function shareLatestAutoBackup() {
-    if (!data) return;
-    const backup = data.settings.autoBackup;
-    if (!backup.lastFileName) {
-      setNotice(t('noBackupYet'));
-      return;
-    }
-
-    try {
-      if (Capacitor.isNativePlatform()) {
-        if (backup.lastLocation === 'downloads' && backup.lastUri) {
-          await Share.share({
-            title: t('autoBackup'),
-            text: backup.lastFileName,
-            url: backup.lastUri,
-          });
-          return;
-        }
-        const directory = backup.lastLocation === 'data' ? Directory.Data : Directory.Documents;
-        const uri = (
-          await Filesystem.getUri({
-            path: makeBackupPath(backup.lastFileName),
-            directory,
-          })
-        ).uri;
-        await Share.share({
-          title: t('autoBackup'),
-          text: backup.lastFileName,
-          url: uri,
-        });
-        return;
-      }
-
-      const json = localStorage.getItem('suki-track:auto-backup');
-      if (!json) {
-        setNotice(t('noBackupYet'));
-        return;
-      }
-      downloadBrowserBackup(json, backup.lastFileName);
-    } catch (error) {
-      setNotice(compactError(error));
-    }
-  }
-
   async function importBackup(file: File | undefined) {
     if (!file || !repositoryRef.current) return;
     setConfirmDialog({
@@ -1060,19 +1454,7 @@ function App() {
       const filename = makeReceiptFilename(summary.customer.name, data.settings.storeName);
       if (Capacitor.isNativePlatform()) {
         const base64 = doc.output('datauristring').split(',')[1];
-        const result = await Filesystem.writeFile({
-          path: filename,
-          data: base64,
-          directory: Directory.Documents,
-        });
-        const uri = result.uri
-          ? result.uri
-          : (
-              await Filesystem.getUri({
-                path: filename,
-                directory: Directory.Documents,
-              })
-            ).uri;
+        const uri = await writeNativeReceipt(base64, filename);
         await Share.share({
           title: t('receipt'),
           text: summary.customer.name,
@@ -1093,7 +1475,7 @@ function App() {
 
   function openProtectedTab(nextTab: Tab) {
     switchTab(nextTab);
-    if (nextTab !== 'products' && nextTab !== 'settings') return;
+    if (nextTab !== 'products' && nextTab !== 'trends' && nextTab !== 'settings') return;
     if (unlockedUntil > Date.now()) {
       setUnlocked(true);
       return;
@@ -1128,15 +1510,25 @@ function App() {
         <div className="brand-copy">
           <h1>{data.settings.storeName}</h1>
         </div>
+        <button
+          type="button"
+          className={tab === 'settings' ? 'header-settings-button active' : 'header-settings-button'}
+          onClick={() => openProtectedTab('settings')}
+          aria-label={t('navSettings')}
+        >
+          <Settings size={21} />
+        </button>
       </header>
 
       {notice && (
         <div className="feedback-backdrop" role="status" aria-live="polite">
           <div className="notice">
-            <AnimatedShopIcon compact />
+            <span className="notice-icon" aria-hidden="true">
+              <Check size={18} />
+            </span>
             <span>{notice}</span>
             <button type="button" className="icon-button close-button" onClick={() => setNotice('')}>
-              <X size={22} />
+              <X size={20} />
             </button>
           </div>
         </div>
@@ -1207,6 +1599,7 @@ function App() {
                 onView={(id) => setSelectedCustomerId(id)}
                 onAddDebt={openQuickDebt}
                 onPrint={printReceipt}
+                onEdit={openCustomerModal}
                 onDelete={deleteCustomer}
                 t={t}
               />
@@ -1233,10 +1626,6 @@ function App() {
             <section className="screen-grid">
               <section className="panel form-panel product-panel">
                 <div className="product-hero">
-                  <Package size={24} />
-                  <div>
-                    <p className="muted">{t('productsHelp')}</p>
-                  </div>
                   <button
                     type="button"
                     className="primary-button product-add-mini"
@@ -1245,10 +1634,19 @@ function App() {
                     <Plus size={20} />
                     {t('addProduct')}
                   </button>
+                  <button
+                    type="button"
+                    className="secondary-button product-add-mini"
+                    onClick={openBulkProductAdd}
+                  >
+                    <Plus size={20} />
+                    {t('bulkAddProducts')}
+                  </button>
                 </div>
               </section>
 
               <section className="panel wide-panel product-panel">
+                <h2>{t('products')}</h2>
                 <div className="search-row">
                   <Search size={24} />
                   <input
@@ -1272,6 +1670,21 @@ function App() {
                   t={t}
                 />
               </section>
+            </section>
+          </ProtectedArea>
+        )}
+
+        {tab === 'trends' && (
+          <ProtectedArea
+            unlocked={unlocked}
+            pinInput={pinInput}
+            setPinInput={setPinInput}
+            onUnlock={unlockWithPin}
+            pinHint={pinHint}
+            t={t}
+          >
+            <section className="analytics-screen">
+              <ProductTrendPanel data={data} t={t} />
             </section>
           </ProtectedArea>
         )}
@@ -1444,6 +1857,15 @@ function App() {
                     {t('large')}
                   </button>
                 </div>
+                <h2>{t('security')}</h2>
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={data.settings.biometricEnabled}
+                    onChange={(event) => void changeBiometricEnabled(event.target.checked)}
+                  />
+                  {t('biometricSetting')}
+                </label>
                 <h2>{t('pinTimeout')}</h2>
                 <div className="two-columns">
                   <label>
@@ -1596,14 +2018,6 @@ function App() {
                 </div>
                 <button
                   type="button"
-                  className="secondary-button"
-                  onClick={() => void shareLatestAutoBackup()}
-                >
-                  <Upload size={22} />
-                  {t('shareAutoBackup')}
-                </button>
-                <button
-                  type="button"
                   className="primary-button"
                   onClick={() => void runAutoBackupNow(data, true)}
                 >
@@ -1631,6 +2045,8 @@ function App() {
           onClose={() => setSelectedCustomerId(null)}
           onPay={openPayment}
           onPrint={printReceipt}
+          onEditDebt={openLedgerModal}
+          onDeleteDebt={deleteLedgerEntry}
           t={t}
         />
       )}
@@ -1944,12 +2360,167 @@ function App() {
         </Modal>
       )}
 
+      {showBulkProductModal && (
+        <Modal
+          title={t('bulkAddProducts')}
+          onClose={() => setShowBulkProductModal(false)}
+        >
+          <form className="modal-form" onSubmit={saveBulkProducts}>
+            <div className="bulk-product-rows">
+              <span className="label">{t('bulkProductsLabel')}</span>
+              {bulkProductRows.map((row, index) => (
+                <div className="bulk-product-row" key={index}>
+                  <input
+                    value={row.name}
+                    placeholder={t('itemName')}
+                    onChange={(event) =>
+                      updateBulkProductRow(index, { name: event.target.value })
+                    }
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={row.price}
+                    placeholder={t('price')}
+                    onChange={(event) =>
+                      updateBulkProductRow(index, { price: event.target.value })
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="icon-button close-button"
+                    onClick={() => removeBulkProductRow(index)}
+                    aria-label={t('delete')}
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              ))}
+              <button type="button" className="secondary-button" onClick={addBulkProductRow}>
+                <Plus size={20} />
+                {t('addItem')}
+              </button>
+            </div>
+            <div className="button-row">
+              <button className="primary-button" type="submit">
+                <Check size={22} />
+                {t('saveAllDebt')}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowBulkProductModal(false)}
+              >
+                {t('cancel')}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showCustomerModal && (
+        <Modal title={t('editPerson')} onClose={() => setShowCustomerModal(false)}>
+          <form className="modal-form" onSubmit={saveCustomer}>
+            <label>
+              {t('customerName')}
+              <input
+                value={customerForm.name}
+                placeholder={t('customerPlaceholder')}
+                onChange={(event) =>
+                  setCustomerForm({ ...customerForm, name: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              {t('paymentNote')}
+              <input
+                value={customerForm.note}
+                placeholder={t('paymentNotePlaceholder')}
+                onChange={(event) =>
+                  setCustomerForm({ ...customerForm, note: event.target.value })
+                }
+              />
+            </label>
+            <div className="button-row">
+              <button className="primary-button" type="submit">
+                <Check size={22} />
+                {t('save')}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowCustomerModal(false)}
+              >
+                {t('cancel')}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showLedgerModal && (
+        <Modal title={t('editDebtItem')} onClose={() => setShowLedgerModal(false)}>
+          <form className="modal-form" onSubmit={saveLedgerEntry}>
+            <label>
+              {t('itemName')}
+              <input
+                value={ledgerForm.itemName}
+                onChange={(event) =>
+                  setLedgerForm({ ...ledgerForm, itemName: event.target.value })
+                }
+              />
+            </label>
+            <div className="two-columns">
+              <label>
+                {t('quantity')}
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={ledgerForm.quantity}
+                  onChange={(event) =>
+                    setLedgerForm({ ...ledgerForm, quantity: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                {t('price')}
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={ledgerForm.unitPrice}
+                  onChange={(event) =>
+                    setLedgerForm({ ...ledgerForm, unitPrice: event.target.value })
+                  }
+                />
+              </label>
+            </div>
+            <div className="button-row">
+              <button className="primary-button" type="submit">
+                <Check size={22} />
+                {t('save')}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowLedgerModal(false)}
+              >
+                {t('cancel')}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
       {confirmDialog && (
         <ConfirmDialog
           dialog={confirmDialog}
           cancelLabel={t('cancel')}
           pinLabel={t('pin')}
           wrongPinLabel={t('wrongPin')}
+          t={t}
           onCancel={() => {
             if (fileInputRef.current) fileInputRef.current.value = '';
             setConfirmDialog(null);
@@ -2025,16 +2596,16 @@ function App() {
           onClick={() => openProtectedTab('products')}
         />
         <NavButton
+          icon={<TrendingUp />}
+          label={t('navTrends')}
+          active={tab === 'trends'}
+          onClick={() => openProtectedTab('trends')}
+        />
+        <NavButton
           icon={<FileClock />}
           label={t('navHistory')}
           active={tab === 'history'}
           onClick={() => openProtectedTab('history')}
-        />
-        <NavButton
-          icon={<Settings />}
-          label={t('navSettings')}
-          active={tab === 'settings'}
-          onClick={() => openProtectedTab('settings')}
         />
       </nav>
     </div>
@@ -2049,6 +2620,7 @@ function CustomerList({
   onView,
   onAddDebt,
   onPrint,
+  onEdit,
   onDelete,
   t,
 }: {
@@ -2059,42 +2631,31 @@ function CustomerList({
   onView: (id: string) => void;
   onAddDebt: (customerId: string) => void;
   onPrint: (id: string) => void;
+  onEdit?: (customer: Customer) => void;
   onDelete?: (id: string) => void;
   t: ReturnType<typeof getTranslator>;
 }) {
   if (!summaries.length) return <EmptyState kind={emptyKind} message={emptyText} />;
   return (
     <div className="list">
-      {summaries.map((summary) => (
-        <article
-          className={onDelete ? 'list-card customer-card has-delete' : 'list-card customer-card'}
-          key={summary.customer.id}
-        >
-          <div>
-            <h3>{summary.customer.name}</h3>
-            <p className="muted date-line">{formatTinyDateTime(summary.lastActivityAt)}</p>
-          </div>
-          <div className="amount-block">
-            <span>{t('balance')}</span>
-            <strong>{formatCurrency(summary.balance)}</strong>
-          </div>
-          {onDelete && (
-            <button
-              type="button"
-              className="delete-customer-button"
-              onClick={() => onDelete(summary.customer.id)}
-              aria-label={t('deleteCustomer')}
+      {summaries.map((summary) => {
+        const card = (
+          <article className="list-card customer-card">
+            <div>
+              <h3>{summary.customer.name}</h3>
+              <p className="muted date-line">{formatTinyDateTime(summary.lastActivityAt)}</p>
+            </div>
+            <div className="amount-block">
+              <span>{t('balance')}</span>
+              <strong>{formatCurrency(summary.balance)}</strong>
+            </div>
+            <div
+              className={
+                summary.balance > 0
+                  ? 'card-actions customer-actions'
+                  : 'card-actions customer-actions no-payment'
+              }
             >
-              <Trash2 size={18} />
-            </button>
-          )}
-          <div
-            className={
-              summary.balance > 0
-                ? 'card-actions customer-actions'
-                : 'card-actions customer-actions no-payment'
-            }
-          >
             <button
               type="button"
               className="secondary-button tone-view"
@@ -2102,6 +2663,15 @@ function CustomerList({
             >
               {t('view')}
             </button>
+            {onEdit && (
+              <button
+                type="button"
+                className="secondary-button tone-view"
+                onClick={() => onEdit(summary.customer)}
+              >
+                {t('edit')}
+              </button>
+            )}
             <button
               type="button"
               className="secondary-button tone-add"
@@ -2127,9 +2697,47 @@ function CustomerList({
               <Printer size={20} />
               {t('receiptShort')}
             </button>
-          </div>
-        </article>
-      ))}
+            </div>
+          </article>
+        );
+        if (!onEdit && !onDelete) return <div key={summary.customer.id}>{card}</div>;
+        return (
+          <SwipeActions
+            key={summary.customer.id}
+            actions={
+              <>
+                {onEdit && (
+                  <button type="button" className="swipe-action edit" onClick={() => onEdit(summary.customer)}>
+                    {t('edit')}
+                  </button>
+                )}
+                {onDelete && (
+                  <button type="button" className="swipe-action delete" onClick={() => onDelete(summary.customer.id)}>
+                    <Trash2 size={18} />
+                  </button>
+                )}
+              </>
+            }
+          >
+            {card}
+          </SwipeActions>
+        );
+      })}
+    </div>
+  );
+}
+
+function SwipeActions({
+  children,
+  actions,
+}: {
+  children: React.ReactNode;
+  actions: React.ReactNode;
+}) {
+  return (
+    <div className="swipe-row">
+      <div className="swipe-content">{children}</div>
+      <div className="swipe-actions">{actions}</div>
     </div>
   );
 }
@@ -2415,6 +3023,196 @@ function AnimatedPeopleDebtIcon() {
   );
 }
 
+function ProductTrendPanel({
+  data,
+  t,
+}: {
+  data: AppData;
+  t: ReturnType<typeof getTranslator>;
+}) {
+  const [range, setRange] = useState<TrendRange>('week');
+  const [selectedMonthIndex, setSelectedMonthIndex] = useState<number | null>(null);
+  const [selectedPointKey, setSelectedPointKey] = useState<string | null>(null);
+  const trends = useMemo(
+    () => buildProductTrends(data, range, selectedMonthIndex ?? undefined),
+    [data, range, selectedMonthIndex],
+  );
+  const selectedPoint =
+    trends.points.find((point) => point.dateKey === selectedPointKey) ??
+    trends.points.find((point) => point.quantity > 0) ??
+    trends.points.at(-1) ??
+    null;
+  const maxQuantity = Math.max(1, ...trends.points.map((point) => point.quantity));
+  const chartWidth = 320;
+  const chartHeight = 112;
+  const chartPadding = 10;
+  const usableWidth = chartWidth - chartPadding * 2;
+  const usableHeight = chartHeight - chartPadding * 2;
+  const chartPoints = trends.points.map((point, index) => {
+    const x =
+      chartPadding +
+      (trends.points.length === 1 ? usableWidth / 2 : (index / (trends.points.length - 1)) * usableWidth);
+    const y = chartPadding + usableHeight - (point.quantity / maxQuantity) * usableHeight;
+    return { ...point, x, y };
+  });
+  const polylinePoints = chartPoints.map((point) => `${point.x},${point.y}`).join(' ');
+
+  return (
+    <section className="panel product-panel trend-panel">
+      <div className="trend-header">
+        <div>
+          <h2>{t('productTrends')}</h2>
+          <p className="muted">
+            {range === 'week'
+              ? t('lastSevenDays')
+              : t('monthView').replace('{month}', getMonthName(trends.monthIndex, 'long'))}
+          </p>
+        </div>
+        <span className="trend-year-badge">{trends.year}</span>
+      </div>
+
+      <div className="trend-range-tabs" role="group" aria-label={t('trendRange')}>
+        {(['week', 'month'] as const).map((option) => (
+          <button
+            type="button"
+            key={option}
+            className={range === option ? 'choice-button selected' : 'choice-button'}
+            onClick={() => {
+              setRange(option);
+              setSelectedPointKey(null);
+            }}
+          >
+            {option === 'week' ? t('sevenDays') : t('month')}
+          </button>
+        ))}
+      </div>
+
+      {range === 'month' && (
+        <div className="trend-month-picker" aria-label={t('selectMonth')}>
+          {Array.from({ length: 12 }, (_, index) => (
+            <button
+              type="button"
+              key={index}
+              className={trends.monthIndex === index ? 'selected' : ''}
+              onClick={() => {
+                setSelectedMonthIndex(index);
+                setSelectedPointKey(null);
+              }}
+            >
+              {getMonthName(index)}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="trend-metrics">
+        <div>
+          <span>{t('itemsMoved')}</span>
+          <strong>{trends.totalQuantity.toLocaleString('en-PH')}</strong>
+        </div>
+        <div>
+          <span>{t('trendValue')}</span>
+          <strong>{formatCurrency(trends.totalValue)}</strong>
+        </div>
+        <div>
+          <span>{t('topProduct')}</span>
+          <strong>{trends.bestItem?.name ?? '-'}</strong>
+        </div>
+      </div>
+
+      <div className="trend-chart" aria-label={t('productTrends')}>
+        <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img">
+          <line
+            x1={chartPadding}
+            y1={chartHeight - chartPadding}
+            x2={chartWidth - chartPadding}
+            y2={chartHeight - chartPadding}
+            className="trend-axis"
+          />
+          {chartPoints.map((point) => (
+            <line
+              key={`grid-${point.dateKey}`}
+              x1={point.x}
+              y1={chartPadding}
+              x2={point.x}
+              y2={chartHeight - chartPadding}
+              className="trend-grid"
+            />
+          ))}
+          <polyline points={polylinePoints} className="trend-line" />
+          {chartPoints.map((point) => (
+            <g
+              key={point.dateKey}
+              role="button"
+              tabIndex={0}
+              className="trend-dot-button"
+              aria-label={`${point.detailLabel}: ${point.quantity.toLocaleString('en-PH')}`}
+              onClick={() => setSelectedPointKey(point.dateKey)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  setSelectedPointKey(point.dateKey);
+                }
+              }}
+            >
+              <circle
+                cx={point.x}
+                cy={point.y}
+                r={selectedPoint?.dateKey === point.dateKey ? 5 : 4}
+                className={point.quantity > 0 ? 'trend-dot active' : 'trend-dot'}
+              />
+            </g>
+          ))}
+        </svg>
+        <div className="trend-days">
+          {chartPoints.map((point) => (
+            <span key={point.dateKey}>{point.label}</span>
+          ))}
+        </div>
+      </div>
+
+      {selectedPoint && (
+        <div className="trend-list">
+          <div className="trend-list-head">
+            <span>{selectedPoint.detailLabel}</span>
+            <span>{t('quantity')}</span>
+          </div>
+          {selectedPoint.items.length ? (
+            selectedPoint.items.map((item) => (
+              <div className="trend-row" key={item.key}>
+                <strong>{item.name}</strong>
+                <span>
+                  {item.quantity.toLocaleString('en-PH')} - {formatCurrency(item.total)}
+                </span>
+              </div>
+            ))
+          ) : (
+            <p className="muted trend-empty">{t('noItemsInPoint')}</p>
+          )}
+        </div>
+      )}
+
+      <div className="trend-list">
+        <div className="trend-list-head">
+          <span>{t('topProducts')}</span>
+          <span>{t('quantity')}</span>
+        </div>
+        {trends.topItems.length ? (
+          trends.topItems.map((item) => (
+            <div className="trend-row" key={item.key}>
+              <strong>{item.name}</strong>
+              <span>
+                {item.quantity.toLocaleString('en-PH')} - {formatCurrency(item.total)}
+              </span>
+            </div>
+          ))
+        ) : (
+          <p className="muted trend-empty">{t('noTrendData')}</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ProductList({
   products,
   emptyText,
@@ -2434,7 +3232,20 @@ function ProductList({
   return (
     <div className="list">
       {products.map((product) => (
-        <article className="list-card product-card" key={product.id}>
+        <SwipeActions
+          key={product.id}
+          actions={
+            <>
+              <button type="button" className="swipe-action edit" onClick={() => onEdit(product)}>
+                {t('edit')}
+              </button>
+              <button type="button" className="swipe-action delete" onClick={() => onDelete(product)}>
+                <Trash2 size={18} />
+              </button>
+            </>
+          }
+        >
+        <article className="list-card product-card">
           <div className="product-card-main">
             <span className="product-card-icon" aria-hidden="true">
               <Package size={18} />
@@ -2444,25 +3255,8 @@ function ProductList({
               <p className="muted">{formatCurrency(product.price)}</p>
             </div>
           </div>
-          <div className="card-actions">
-            <button
-              type="button"
-              className="icon-action-button tone-edit"
-              onClick={() => onEdit(product)}
-              aria-label={t('edit')}
-            >
-              <span>{t('edit')}</span>
-            </button>
-            <button
-              type="button"
-              className="icon-action-button danger"
-              onClick={() => onDelete(product)}
-              aria-label={t('delete')}
-            >
-              <Trash2 size={18} />
-            </button>
-          </div>
         </article>
+        </SwipeActions>
       ))}
     </div>
   );
@@ -2471,15 +3265,22 @@ function ProductList({
 function ActivityList({
   logs,
   emptyText = 'No records yet.',
+  onEditDebt,
+  onDeleteDebt,
+  t,
 }: {
   logs: ReturnType<typeof buildActivityLogs>;
   emptyText?: string;
+  onEditDebt?: (id: string) => void;
+  onDeleteDebt?: (id: string) => void;
+  t?: ReturnType<typeof getTranslator>;
 }) {
   if (!logs.length) return <EmptyState kind="history" message={emptyText} />;
   return (
     <div className="list">
-      {logs.map((log) => (
-        <article className="list-card activity-card" key={log.id}>
+      {logs.map((log) => {
+        const card = (
+          <article className="list-card activity-card">
           <div>
             <h3>{log.customerName}</h3>
             <p className="muted">{log.label}</p>
@@ -2489,8 +3290,29 @@ function ActivityList({
             {log.kind === 'payment' ? '-' : '+'}
             {formatCurrency(log.amount)}
           </strong>
-        </article>
-      ))}
+          </article>
+        );
+        if (log.kind !== 'debt' || !onEditDebt || !onDeleteDebt || !t) {
+          return <div key={log.id}>{card}</div>;
+        }
+        return (
+          <SwipeActions
+            key={log.id}
+            actions={
+              <>
+                <button type="button" className="swipe-action edit" onClick={() => onEditDebt(log.id)}>
+                  {t('edit')}
+                </button>
+                <button type="button" className="swipe-action delete" onClick={() => onDeleteDebt(log.id)}>
+                  <Trash2 size={18} />
+                </button>
+              </>
+            }
+          >
+            {card}
+          </SwipeActions>
+        );
+      })}
     </div>
   );
 }
@@ -2501,6 +3323,8 @@ function CustomerDetail({
   onClose,
   onPay,
   onPrint,
+  onEditDebt,
+  onDeleteDebt,
   t,
 }: {
   summary: CustomerSummary;
@@ -2508,6 +3332,8 @@ function CustomerDetail({
   onClose: () => void;
   onPay: (id: string) => void;
   onPrint: (id: string) => void;
+  onEditDebt: (id: string) => void;
+  onDeleteDebt: (id: string) => void;
   t: ReturnType<typeof getTranslator>;
 }) {
   const [logPage, setLogPage] = useState(1);
@@ -2551,6 +3377,9 @@ function CustomerDetail({
       <ActivityList
         logs={paginate(customerLogs, currentLogPage, PAGE_SIZE)}
         emptyText={t('noHistoryEmpty')}
+        onEditDebt={onEditDebt}
+        onDeleteDebt={onDeleteDebt}
+        t={t}
       />
       <Pagination
         totalItems={customerLogs.length}
@@ -2631,6 +3460,7 @@ function ConfirmDialog({
   cancelLabel,
   pinLabel,
   wrongPinLabel,
+  t,
   onCancel,
   onConfirm,
 }: {
@@ -2638,11 +3468,27 @@ function ConfirmDialog({
   cancelLabel: string;
   pinLabel: string;
   wrongPinLabel: string;
+  t: ReturnType<typeof getTranslator>;
   onCancel: () => void;
   onConfirm: () => Promise<void> | void;
 }) {
   const [pinValue, setPinValue] = useState('');
   const [pinError, setPinError] = useState('');
+  const [checkingBiometric, setCheckingBiometric] = useState(false);
+
+  async function handleBiometricConfirm() {
+    if (!dialog.requiresPin) return;
+    setCheckingBiometric(true);
+    const ok = await verifyWithDeviceBiometric(t);
+    setCheckingBiometric(false);
+    if (ok) await onConfirm();
+  }
+
+  useEffect(() => {
+    if (!dialog.requiresPin || !dialog.preferBiometric) return;
+    void handleBiometricConfirm();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleConfirm() {
     if (dialog.requiresPin) {
@@ -2660,21 +3506,34 @@ function ConfirmDialog({
       <div className="confirm-content">
         <p>{dialog.message}</p>
         {dialog.requiresPin && (
-          <label className="confirm-pin">
-            {pinLabel}
-            <input
-              type="password"
-              inputMode="numeric"
-              maxLength={4}
-              placeholder={pinLabel}
-              value={pinValue}
-              onChange={(event) => {
-                setPinValue(event.target.value);
-                setPinError('');
-              }}
-            />
-            {pinError && <span>{pinError}</span>}
-          </label>
+          <div className="confirm-security">
+            {dialog.preferBiometric && (
+              <button
+                type="button"
+                className="secondary-button biometric-button"
+                disabled={checkingBiometric}
+                onClick={() => void handleBiometricConfirm()}
+              >
+                <Lock size={18} />
+                {checkingBiometric ? t('checkingBiometric') : t('useFingerprint')}
+              </button>
+            )}
+            <label className="confirm-pin">
+              {pinLabel}
+              <input
+                type="password"
+                inputMode="numeric"
+                maxLength={4}
+                placeholder={pinLabel}
+                value={pinValue}
+                onChange={(event) => {
+                  setPinValue(event.target.value);
+                  setPinError('');
+                }}
+              />
+              {pinError && <span>{pinError}</span>}
+            </label>
+          </div>
         )}
         <div className="button-row">
           <button type="button" className="secondary-button" onClick={onCancel}>

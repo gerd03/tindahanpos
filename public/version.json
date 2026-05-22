@@ -1,7 +1,7 @@
 {
-  "version": "1.0",
-  "versionCode": 1,
-  "apkUrl": "https://github.com/gerd03/tindahanpos/releases/download/v1.0/suki-track-1.0.apk",
-  "notes": "Initial release.",
+  "version": "1.0.2",
+  "versionCode": 3,
+  "apkUrl": "https://github.com/gerd03/tindahanpos/releases/download/v1.0.2/suki-track-1.0.2.apk",
+  "notes": "Security, biometrics, swipe actions, trends, receipts, and product/customer management improvements.",
   "required": false
 }

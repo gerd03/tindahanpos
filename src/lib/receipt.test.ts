@@ -53,6 +53,7 @@ const data: AppData = {
     storeName: 'Tindahan ni Lola Magding',
     ownerName: 'Lola Magding',
     pinUpdatedAt: null,
+    biometricEnabled: true,
     pinTimeout: {
       every: 10,
       unit: 'minutes',
@@ -84,7 +85,7 @@ describe('receipt data', () => {
 
   it('uses pdf filenames for receipts', () => {
     expect(makeReceiptFilename('Robert Caton', 'Tindahan ni Lola')).toMatch(
-      /^SukiTrack_TindahanNiLola_RobertCaton_\d{4}-\d{2}-\d{2}\.pdf$/,
+      /^RobertCaton_SukiTrack_TindahanNiLola_\d{4}-\d{2}-\d{2}\.pdf$/,
     );
   });
 });

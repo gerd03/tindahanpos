@@ -63,12 +63,20 @@ export function createCustomerReceiptPdf(data: AppData, customerId: string): jsP
   const margin = 40;
   const contentWidth = pageWidth - margin * 2;
   const footerY = pageHeight - 34;
+  const table = {
+    left: margin,
+    right: pageWidth - margin,
+    dateRight: margin + 84,
+    itemRight: margin + 310,
+    qtyRight: margin + 356,
+    unitRight: margin + 440,
+  };
   const columns = {
-    date: margin,
-    item: margin + 86,
-    qty: margin + 318,
-    unit: margin + 374,
-    amount: pageWidth - margin,
+    date: table.left + 6,
+    item: table.dateRight + 6,
+    qty: table.qtyRight - 6,
+    unit: table.unitRight - 6,
+    amount: table.right - 6,
   };
   let pageNumber = 1;
   let y = 40;
@@ -111,8 +119,11 @@ export function createCustomerReceiptPdf(data: AppData, customerId: string): jsP
   }
 
   function addTableHeader() {
+    const headerHeight = 24;
     doc.setDrawColor(0, 0, 0);
-    doc.line(margin, y, pageWidth - margin, y);
+    doc.setLineWidth(0.8);
+    doc.rect(table.left, y, table.right - table.left, headerHeight);
+    drawTableVerticals(y, y + headerHeight);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
     doc.setTextColor(0, 0, 0);
@@ -121,9 +132,7 @@ export function createCustomerReceiptPdf(data: AppData, customerId: string): jsP
     doc.text('Qty', columns.qty, y + 14, { align: 'right' });
     doc.text('Unit', columns.unit, y + 14, { align: 'right' });
     doc.text('Amount', columns.amount, y + 14, { align: 'right' });
-    y += 22;
-    doc.line(margin, y, pageWidth - margin, y);
-    y += 8;
+    y += headerHeight;
   }
 
   function newPage() {
@@ -132,6 +141,12 @@ export function createCustomerReceiptPdf(data: AppData, customerId: string): jsP
     pageNumber += 1;
     y = 40;
     addTableHeader();
+  }
+
+  function drawTableVerticals(top: number, bottom: number) {
+    for (const x of [table.dateRight, table.itemRight, table.qtyRight, table.unitRight]) {
+      doc.line(x, top, x, bottom);
+    }
   }
 
   addHeader();
@@ -151,13 +166,15 @@ export function createCustomerReceiptPdf(data: AppData, customerId: string): jsP
   }
 
   for (const row of receipt.rows) {
-    const itemLines = doc.splitTextToSize(row.itemName, 188) as string[];
+    const itemLines = doc.splitTextToSize(row.itemName, 210) as string[];
     const dateLines = doc.splitTextToSize(shortPdfDate(row.date), 72) as string[];
-    const rowHeight = Math.max(34, 16 + Math.max(itemLines.length, dateLines.length) * 11);
+    const rowHeight = Math.max(38, 16 + Math.max(itemLines.length, dateLines.length) * 11);
     if (y + rowHeight > footerY - 26) newPage();
 
-    doc.setDrawColor(185, 185, 185);
-    doc.line(margin, y + rowHeight, pageWidth - margin, y + rowHeight);
+    doc.setDrawColor(170, 185, 176);
+    doc.setLineWidth(0.6);
+    doc.rect(table.left, y, table.right - table.left, rowHeight);
+    drawTableVerticals(y, y + rowHeight);
 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
@@ -179,15 +196,14 @@ export function createCustomerReceiptPdf(data: AppData, customerId: string): jsP
 
   const totalsHeight = 48;
   if (y + totalsHeight > footerY - 20) newPage();
-  y += 14;
   doc.setDrawColor(0, 0, 0);
-  doc.line(margin, y, pageWidth - margin, y);
-  y += 18;
+  doc.setLineWidth(0.8);
+  doc.rect(table.left, y, table.right - table.left, 34);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(0, 0, 0);
-  doc.text('Total Active Utang', margin, y);
-  doc.text(pdfMoney(receipt.finalBalance), pageWidth - margin, y, { align: 'right' });
+  doc.text('Total Active Utang', table.left + 6, y + 21);
+  doc.text(pdfMoney(receipt.finalBalance), table.right - 6, y + 21, { align: 'right' });
 
   addFooter();
   return doc;
@@ -196,7 +212,7 @@ export function createCustomerReceiptPdf(data: AppData, customerId: string): jsP
 export function makeReceiptFilename(customerName: string, storeName = ''): string {
   const safeStore = toPascalFilePart(storeName) || 'SukiTrack';
   const safeName = toPascalFilePart(customerName) || 'Customer';
-  return `SukiTrack_${safeStore}_${safeName}_${new Date()
+  return `${safeName}_SukiTrack_${safeStore}_${new Date()
     .toISOString()
     .slice(0, 10)}.pdf`;
 }

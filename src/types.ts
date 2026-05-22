@@ -52,6 +52,7 @@ export interface Settings {
   storeName: string;
   ownerName: string;
   pinUpdatedAt: string | null;
+  biometricEnabled: boolean;
   pinTimeout: PinTimeoutSettings;
   autoBackup: AutoBackupSettings;
 }

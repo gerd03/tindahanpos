@@ -28,6 +28,8 @@ export interface AppRepository {
   deleteCustomer(customerId: string): Promise<void>;
   addLedgerEntry(entry: LedgerEntry): Promise<void>;
   addLedgerEntries(entries: LedgerEntry[]): Promise<void>;
+  updateLedgerEntry(entry: LedgerEntry): Promise<void>;
+  deleteLedgerEntry(entryId: string): Promise<void>;
   addPayment(payment: Payment): Promise<void>;
   replaceAll(data: AppData): Promise<void>;
 }
@@ -114,6 +116,22 @@ class BrowserRepository implements AppRepository {
     if (!entries.length) return;
     const data = await this.load();
     this.write({ ...data, ledgerEntries: [...data.ledgerEntries, ...entries] });
+  }
+
+  async updateLedgerEntry(entry: LedgerEntry): Promise<void> {
+    const data = await this.load();
+    this.write({
+      ...data,
+      ledgerEntries: data.ledgerEntries.map((item) => (item.id === entry.id ? entry : item)),
+    });
+  }
+
+  async deleteLedgerEntry(entryId: string): Promise<void> {
+    const data = await this.load();
+    this.write({
+      ...data,
+      ledgerEntries: data.ledgerEntries.filter((entry) => entry.id !== entryId),
+    });
   }
 
   async addPayment(payment: Payment): Promise<void> {
@@ -325,6 +343,30 @@ class SqliteRepository implements AppRepository {
       await this.db!.execute('ROLLBACK;', false);
       throw error;
     }
+  }
+
+  async updateLedgerEntry(entry: LedgerEntry): Promise<void> {
+    await this.open();
+    await this.db!.run(
+      `
+      UPDATE ledger_entries
+      SET product_id = ?, item_name = ?, quantity = ?, unit_price = ?, total = ?
+      WHERE id = ?;
+      `,
+      [
+        entry.productId,
+        entry.itemName,
+        entry.quantity,
+        entry.unitPrice,
+        entry.total,
+        entry.id,
+      ],
+    );
+  }
+
+  async deleteLedgerEntry(entryId: string): Promise<void> {
+    await this.open();
+    await this.db!.run(`DELETE FROM ledger_entries WHERE id = ?;`, [entryId]);
   }
 
   async addPayment(payment: Payment): Promise<void> {

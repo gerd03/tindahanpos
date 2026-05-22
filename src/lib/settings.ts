@@ -26,17 +26,18 @@ export async function createDefaultSettings(): Promise<Settings> {
   return {
     language: 'ceb',
     pinHash: await defaultPinHash(),
-    uiSize: 'large',
+    uiSize: 'normal',
     storeName: DEFAULT_STORE_NAME,
     ownerName: '',
     pinUpdatedAt: null,
+    biometricEnabled: true,
     pinTimeout: {
-      every: 10,
-      unit: 'minutes',
+      every: 1,
+      unit: 'hours',
     },
     autoBackup: {
       enabled: true,
-      every: 8,
+      every: 1,
       unit: 'hours',
       lastRunAt: null,
       lastAttemptAt: null,
@@ -62,6 +63,10 @@ export async function normalizeSettings(
       typeof settings?.pinUpdatedAt === 'string' && settings.pinUpdatedAt.trim()
         ? settings.pinUpdatedAt
         : null,
+    biometricEnabled:
+      typeof settings?.biometricEnabled === 'boolean'
+        ? settings.biometricEnabled
+        : defaults.biometricEnabled,
     pinTimeout: normalizePinTimeout(settings?.pinTimeout, defaults.pinTimeout),
     autoBackup: normalizeAutoBackup(settings?.autoBackup, defaults.autoBackup),
   };
