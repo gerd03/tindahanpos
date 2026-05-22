@@ -1,7 +1,7 @@
 {
-  "version": "1.0.3",
-  "versionCode": 4,
-  "apkUrl": "https://github.com/gerd03/tindahanpos/releases/download/v1.0.3/suki-track-1.0.3.apk",
-  "notes": "Fixes secure debt saving on phones and improves swipe actions for people, products, and debt history.",
+  "version": "1.0.4",
+  "versionCode": 5,
+  "apkUrl": "https://github.com/gerd03/tindahanpos/releases/download/v1.0.4/suki-track-1.0.4.apk",
+  "notes": "Polishes swipe actions so edit appears above delete and card borders stay intact.",
   "required": true
 }

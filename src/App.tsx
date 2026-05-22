@@ -2769,10 +2769,10 @@ function SwipeActions({
         startRef.current = null;
       }}
     >
-      <div className="swipe-actions">{actions}</div>
       <div className="swipe-content" onClick={() => open && setOpen(false)}>
         {children}
       </div>
+      <div className="swipe-actions">{actions}</div>
     </div>
   );
 }

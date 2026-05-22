@@ -1,5 +1,5 @@
-export const CURRENT_APP_VERSION = '1.0.3';
-export const CURRENT_APP_VERSION_CODE = 4;
+export const CURRENT_APP_VERSION = '1.0.4';
+export const CURRENT_APP_VERSION_CODE = 5;
 
 // Deploy public/version.json to Vercel and replace this with your live URL.
 export const UPDATE_MANIFEST_URL = 'https://tindahanpos.vercel.app/version.json';
